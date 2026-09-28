@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import threading
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,9 +11,11 @@ from .engine import EditPlan, TextEngine
 
 
 WH_KEYBOARD_LL = 13
-WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+WM_KEYDOWN, WM_KEYUP, WM_CHAR = 0x0100, 0x0101, 0x0102
 WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
 LLKHF_INJECTED = 0x10
+VK_PACKET = 0xE7
+SELF_INJECTION_MARKER = 0x4B55475054
 VK_BACK, VK_RETURN, VK_SPACE = 0x08, 0x0D, 0x20
 VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN = 0x11, 0x12, 0x5B, 0x5C
 INPUT_KEYBOARD, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE = 1, 0x0002, 0x0004
@@ -82,6 +85,11 @@ user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintyp
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetKeyboardLayout.restype = wintypes.HANDLE
 user32.SendMessageW.restype = ctypes.c_ssize_t
+user32.SendMessageTimeoutW.argtypes = (
+    wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+    wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+)
+user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
 kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
@@ -93,6 +101,10 @@ EXCLUDED_PROCESSES = {
     "1password.exe", "bitwarden.exe", "credentialuibroker.exe", "keepass.exe",
     "keepassxc.exe", "lastpass.exe", "logonui.exe",
 }
+CONTROL_KEYS = {VK_CONTROL, 0xA2, 0xA3}
+ALT_KEYS = {VK_MENU, 0xA4, 0xA5}
+WINDOWS_KEYS = {VK_LWIN, VK_RWIN}
+MODIFIER_KEYS = CONTROL_KEYS | ALT_KEYS | WINDOWS_KEYS | {0x10, 0xA0, 0xA1}
 
 
 @dataclass
@@ -108,7 +120,9 @@ class KeyboardDaemon:
         self.hook = None
         self.last_window = None
         self.last_undo: UndoRecord | None = None
+        self.pending_undo: tuple[UndoRecord, int] | None = None
         self.swallowed_keys: set[int] = set()
+        self.pressed_keys: set[int] = set()
         self.callback = HOOKPROC(self._callback)
 
     def run(self) -> None:
@@ -132,16 +146,25 @@ class KeyboardDaemon:
             if code < 0:
                 return self._next(code, wparam, lparam)
             data = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            if data.flags & LLKHF_INJECTED:
+            if data.flags & LLKHF_INJECTED and data.dwExtraInfo == SELF_INJECTION_MARKER:
                 return self._next(code, wparam, lparam)
             vk = int(data.vkCode)
             is_down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
             is_up = wparam in (WM_KEYUP, WM_SYSKEYUP)
+            if is_up:
+                self.pressed_keys.discard(vk)
+                if vk in CONTROL_KEYS | ALT_KEYS and self.pending_undo and not self.pressed_keys.intersection(CONTROL_KEYS | ALT_KEYS):
+                    undo, window = self.pending_undo
+                    self.pending_undo = None
+                    timer = threading.Timer(0.02, self._finish_undo, args=(undo, window))
+                    timer.daemon = True
+                    timer.start()
             if is_up and vk in self.swallowed_keys:
                 self.swallowed_keys.remove(vk)
                 return 1
             if not is_down:
                 return self._next(code, wparam, lparam)
+            self.pressed_keys.add(vk)
 
             foreground = user32.GetForegroundWindow()
             if foreground != self.last_window:
@@ -153,15 +176,18 @@ class KeyboardDaemon:
                 self.last_undo = None
                 return self._next(code, wparam, lparam)
 
-            if vk == VK_BACK and pressed(VK_CONTROL) and pressed(VK_MENU):
+            if vk == VK_BACK and self.pressed_keys.intersection(CONTROL_KEYS) and self.pressed_keys.intersection(ALT_KEYS):
                 if self.last_undo:
                     self.swallowed_keys.add(vk)
-                    send_replacement(len(self.last_undo.replacement), self.last_undo.original)
+                    self.pending_undo = (self.last_undo, foreground)
                     self.last_undo = None
                     self.engine.reset_context()
                     return 1
                 return self._next(code, wparam, lparam)
-            if any(pressed(key) for key in (VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN)):
+            if vk in MODIFIER_KEYS:
+                self.engine.reset_context()
+                return self._next(code, wparam, lparam)
+            if self.pressed_keys.intersection(CONTROL_KEYS | ALT_KEYS | WINDOWS_KEYS):
                 self.engine.reset_context()
                 self.last_undo = None
                 return self._next(code, wparam, lparam)
@@ -174,17 +200,22 @@ class KeyboardDaemon:
             if boundary:
                 kind, punctuation = boundary
                 plan = self.engine.complete_boundary(kind, punctuation)
+                self.swallowed_keys.add(vk)
                 if plan:
-                    self.swallowed_keys.add(vk)
                     send_replacement(plan.delete_count, plan.insert_text)
                     self.last_undo = UndoRecord(plan.original_text, plan.insert_text)
                     return 1
                 self.last_undo = None
-                return self._next(code, wparam, lparam)
+                send_replacement(0, {"space": " ", "enter": "\r"}.get(kind, punctuation))
+                return 1
 
             typed = translate_key(vk, data.scanCode)
             if typed:
                 self.engine.type_character(typed)
+                self.swallowed_keys.add(vk)
+                send_replacement(0, typed)
+                self.last_undo = None
+                return 1
             elif vk not in (0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5):
                 self.engine.reset_context()
             self.last_undo = None
@@ -192,9 +223,12 @@ class KeyboardDaemon:
         except Exception:
             return self._next(code, wparam, lparam)
 
-
-def pressed(vk: int) -> bool:
-    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+    def _finish_undo(self, undo: UndoRecord, window: int) -> None:
+        if user32.GetForegroundWindow() == window:
+            try:
+                send_replacement(len(undo.replacement), undo.original)
+            except Exception:
+                pass
 
 
 def get_boundary(vk: int, scan_code: int) -> tuple[str, str] | None:
@@ -209,6 +243,8 @@ def get_boundary(vk: int, scan_code: int) -> tuple[str, str] | None:
 
 
 def translate_key(vk: int, scan_code: int) -> str | None:
+    if vk == VK_PACKET and 32 <= scan_code <= 0xFFFF:
+        return chr(scan_code)
     state = (ctypes.c_ubyte * 256)()
     if not user32.GetKeyboardState(state):
         return None
@@ -220,26 +256,44 @@ def translate_key(vk: int, scan_code: int) -> str | None:
 
 
 def send_replacement(delete_count: int, text: str) -> None:
-    values: list[INPUT] = []
+    target = focused_window()
+    if not target:
+        raise RuntimeError("No focused window to edit")
     for _ in range(delete_count):
-        values.extend((key_input(VK_BACK), key_input(VK_BACK, KEYEVENTF_KEYUP)))
+        send_message(target, WM_KEYDOWN, VK_BACK)
+        send_message(target, WM_KEYUP, VK_BACK)
     for char in text:
         if char == "\r":
-            values.extend((key_input(VK_RETURN), key_input(VK_RETURN, KEYEVENTF_KEYUP)))
+            send_message(target, WM_KEYDOWN, VK_RETURN)
+            send_message(target, WM_KEYUP, VK_RETURN)
         else:
-            values.extend((unicode_input(char), unicode_input(char, KEYEVENTF_KEYUP)))
-    if values:
-        array = (INPUT * len(values))(*values)
-        if user32.SendInput(len(values), array, ctypes.sizeof(INPUT)) != len(values):
-            raise ctypes.WinError(ctypes.get_last_error())
+            send_message(target, WM_CHAR, ord(char))
+
+
+def send_message(target: int, message: int, value: int) -> None:
+    result = ctypes.c_size_t()
+    if not user32.SendMessageTimeoutW(target, message, value, 1, 0x2, 100, ctypes.byref(result)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def focused_window() -> int | None:
+    foreground = user32.GetForegroundWindow()
+    if not foreground:
+        return None
+    process_id = wintypes.DWORD()
+    thread_id = user32.GetWindowThreadProcessId(foreground, ctypes.byref(process_id))
+    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    if user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)) and info.hwndFocus:
+        return info.hwndFocus
+    return foreground
 
 
 def key_input(vk: int, flags: int = 0) -> INPUT:
-    return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=vk, dwFlags=flags))
+    return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=vk, dwFlags=flags, dwExtraInfo=SELF_INJECTION_MARKER))
 
 
 def unicode_input(char: str, flags: int = 0) -> INPUT:
-    return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wScan=ord(char), dwFlags=KEYEVENTF_UNICODE | flags))
+    return INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wScan=ord(char), dwFlags=KEYEVENTF_UNICODE | flags, dwExtraInfo=SELF_INJECTION_MARKER))
 
 
 def sensitive_target(window: int) -> bool:
@@ -252,7 +306,13 @@ def sensitive_target(window: int) -> bool:
         return True
     info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
     if user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)) and info.hwndFocus:
-        if user32.SendMessageW(info.hwndFocus, EM_GETPASSWORDCHAR, 0, 0):
+        password_character = ctypes.c_size_t()
+        if not user32.SendMessageTimeoutW(
+            info.hwndFocus, EM_GETPASSWORDCHAR, 0, 0, 0x2, 50,
+            ctypes.byref(password_character),
+        ):
+            return True
+        if password_character.value:
             return True
     return False
 

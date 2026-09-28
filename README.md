@@ -1,6 +1,8 @@
 # kuGPT
 
-Private, local, system-wide writing correction for Windows. kuGPT corrects spelling with a SymSpell-style engine, capitalizes sentences, and adds conservative punctuation in desktop apps such as Notepad, WhatsApp, and Microsoft Office.
+Private, local writing correction for Windows. kuGPT corrects spelling with a SymSpell-style engine, capitalizes sentences, and adds conservative punctuation through a system-wide keyboard hook.
+
+Live correction and undo have been verified in Notepad. Other apps, including WhatsApp and Microsoft Office, still need compatibility testing; do not assume they work identically.
 
 Everything typed is processed in a short in-memory buffer. There is no account, API key, telemetry, cloud model, or stored typing history.
 
@@ -30,7 +32,7 @@ The second command must print:
 I am not the nice person
 ```
 
-Then type `i am nto tehe ncie pesron ` in Notepad. It should become `I am not the nice person ` as each word boundary is reached.
+Then type `i am nto tehe ncie pesron ` in a fresh Notepad tab. It should become `I am not the nice person ` as each word boundary is reached. Try other apps in a disposable draft first. If typing misbehaves, run `kugpt stop` immediately.
 
 ## Commands
 
