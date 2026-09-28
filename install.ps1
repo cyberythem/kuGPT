@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepositoryRoot = "https://raw.githubusercontent.com/cyberythem/kuGPT/2c56e5b0d557f0a15d50257833f5715ed0b32aa4"
+$RepositoryRoot = "https://raw.githubusercontent.com/cyberythem/kuGPT/dec1534941ef37a7c2253ee68f963776877ed5de"
 $PythonUrl = "https://www.python.org/ftp/python/3.13.7/python-3.13.7-embed-amd64.zip"
 $PythonSha256 = "F6CCA216A359BE84797CABB54149CE5E062AFB16CC7567EB7FC51CACB2D86B65"
 $DictionaryUrl = "https://raw.githubusercontent.com/wolfgarbe/SymSpell/v6.7.3/SymSpell/frequency_dictionary_en_82_765.txt"
@@ -116,7 +116,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "kuGPT 0.3.1 is installed with local SymSpell correction." -ForegroundColor Green
+    Write-Host "kuGPT 0.3.2 is installed with local SymSpell correction." -ForegroundColor Green
     if (-not $NoStartup) { Write-Host "Open a new terminal and run: kugpt status" }
     Write-Host "Test it: kugpt fix i am nto tehe ncie pesron"
     Write-Host "Undo a live correction with Ctrl+Alt+Backspace."
