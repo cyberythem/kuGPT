@@ -15,6 +15,8 @@ namespace KuGPT.Tests
             TestEnterPunctuation();
             TestContextCorrection();
             TestBackspace();
+            TestConservativePunctuation();
+            TestCasePreservation();
 
             if (failures == 0)
             {
@@ -77,6 +79,22 @@ namespace KuGPT.Tests
             engine.Backspace();
             EditPlan plan = engine.CompleteBoundary(BoundaryKind.Space, '\0');
             Equal("The ", plan.InsertText, "backspace updates buffered word");
+        }
+
+        private static void TestConservativePunctuation()
+        {
+            TextEngine engine = new TextEngine();
+            Complete(engine, "hi");
+            EditPlan plan = engine.CompleteBoundary(BoundaryKind.Space, '\0');
+            Equal(null, plan, "double space ignores short phrases");
+        }
+
+        private static void TestCasePreservation()
+        {
+            TextEngine engine = new TextEngine();
+            Type(engine, "TEH");
+            EditPlan plan = engine.CompleteBoundary(BoundaryKind.Space, '\0');
+            Equal("THE ", plan.InsertText, "preserves all-caps spelling");
         }
 
         private static void Complete(TextEngine engine, string word)
