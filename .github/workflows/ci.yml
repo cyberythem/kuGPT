@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        shell: powershell
+        run: .\build.ps1 -Test
+      - name: Run diagnostics
+        shell: powershell
+        run: .\dist\kugpt.exe doctor
+
