@@ -203,7 +203,7 @@ def get_boundary(vk: int, scan_code: int) -> tuple[str, str] | None:
     if vk == VK_RETURN:
         return "enter", ""
     value = translate_key(vk, scan_code)
-    if value in ".!?,;:":
+    if value is not None and value in ".!?,;:":
         return "punctuation", value
     return None
 
@@ -216,7 +216,7 @@ def translate_key(vk: int, scan_code: int) -> str | None:
     scan = scan_code or user32.MapVirtualKeyExW(vk, 0, layout)
     buffer = ctypes.create_unicode_buffer(8)
     result = user32.ToUnicodeEx(vk, scan, state, buffer, len(buffer), 0, layout)
-    return buffer.value[0] if result == 1 and buffer.value and not buffer.value[0].iscntrl() else None
+    return buffer.value[0] if result == 1 and buffer.value and ord(buffer.value[0]) >= 32 else None
 
 
 def send_replacement(delete_count: int, text: str) -> None:
@@ -247,7 +247,8 @@ def sensitive_target(window: int) -> bool:
         return True
     process_id = wintypes.DWORD()
     thread_id = user32.GetWindowThreadProcessId(window, ctypes.byref(process_id))
-    if process_name(process_id.value).casefold() in EXCLUDED_PROCESSES:
+    name = process_name(process_id.value)
+    if not name or name.casefold() in EXCLUDED_PROCESSES:
         return True
     info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
     if user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)) and info.hwndFocus:
