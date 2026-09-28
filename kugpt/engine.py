@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterable
 
 from .spelling import SymSpell, damerau_levenshtein
 
@@ -22,20 +23,34 @@ BUILT_INS = {
     "youre": "you're",
 }
 MODALS = {"could", "would", "should", "might", "must"}
+PROTECTED_WORDS = {"kugpt"}
 
 
 class TextEngine:
-    def __init__(self, spelling: SymSpell):
+    def __init__(self, spelling: SymSpell, accepted_words: Iterable[str] = (), initial_sentence_start: bool = True):
         self.spelling = spelling
-        self.reset_context()
+        self.accepted_words = set(PROTECTED_WORDS)
+        for word in accepted_words:
+            normalized = normalize_user_word(word)
+            if normalized:
+                self.accepted_words.add(normalized)
+        self.reset_context(start_of_sentence=initial_sentence_start)
 
-    def reset_context(self) -> None:
+    def reset_context(self, start_of_sentence: bool = False) -> None:
         self.current_word = ""
         self.previous_word = ""
-        self.sentence_start = True
+        self.sentence_start = start_of_sentence
         self.sentence_has_terminal = False
         self.words_in_sentence = 0
         self.last_input_was_space = False
+
+    def accept_word(self, word: str) -> str | None:
+        """Keep a rejected correction unchanged for this and future contexts."""
+        normalized = normalize_user_word(word)
+        if normalized and normalized not in self.accepted_words:
+            self.accepted_words.add(normalized)
+            return normalized
+        return None
 
     def type_character(self, value: str) -> None:
         if value.isalpha() or value in "'-":
@@ -58,7 +73,7 @@ class TextEngine:
         boundary = {"space": " ", "enter": "\r"}.get(kind, punctuation)
         if word:
             corrected = self._correct_word(word)
-            if self.sentence_start:
+            if self.sentence_start and word.casefold() not in self.accepted_words and not has_internal_capitals(word):
                 corrected = capitalize(corrected)
             self.words_in_sentence += 1
             self.previous_word = corrected.rsplit(" ", 1)[-1]
@@ -92,6 +107,10 @@ class TextEngine:
 
     def _correct_word(self, word: str) -> str:
         lowered = word.casefold()
+        if lowered in self.accepted_words or has_internal_capitals(word):
+            return word
+        if word.istitle() and not self.sentence_start:
+            return word
         if lowered == "of" and self.previous_word.casefold() in MODALS:
             replacement = "have"
         else:
@@ -113,6 +132,17 @@ def confident(original: str, suggestion: str | None) -> bool:
         return False
     distance = damerau_levenshtein(original.casefold(), suggestion.casefold(), 2)
     return distance == 1 or (distance == 2 and len(original) >= 7)
+
+
+def normalize_user_word(word: str) -> str | None:
+    word = word.strip().casefold()
+    if 2 <= len(word) <= 40 and all(char.isalpha() or char in "'-" for char in word):
+        return word
+    return None
+
+
+def has_internal_capitals(word: str) -> bool:
+    return not word.isupper() and any(char.isupper() for char in word[1:])
 
 
 def match_case(original: str, replacement: str) -> str:

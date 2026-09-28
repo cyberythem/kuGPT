@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import ctypes
 import os
+import queue
 import threading
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
-from .engine import EditPlan, TextEngine
+from .engine import TextEngine
 
 
 WH_KEYBOARD_LL = 13
+WH_MOUSE_LL = 14
 WM_KEYDOWN, WM_KEYUP, WM_CHAR = 0x0100, 0x0101, 0x0102
 WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
+WM_GETTEXTLENGTH = 0x000E
+MOUSE_CLICKS = {0x0201, 0x0204, 0x0207, 0x020B}
 LLKHF_INJECTED = 0x10
 VK_PACKET = 0xE7
 SELF_INJECTION_MARKER = 0x4B55475054
@@ -84,6 +88,8 @@ user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetKeyboardLayout.restype = wintypes.HANDLE
+user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+user32.GetClassNameW.restype = ctypes.c_int
 user32.SendMessageW.restype = ctypes.c_ssize_t
 user32.SendMessageTimeoutW.argtypes = (
     wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
@@ -114,20 +120,34 @@ class UndoRecord:
 
 
 class KeyboardDaemon:
-    def __init__(self, engine: TextEngine, pause_file: Path):
+    def __init__(self, engine: TextEngine, pause_file: Path, accepted_words_file: Path | None = None):
         self.engine = engine
         self.pause_file = Path(pause_file)
+        self.accepted_words_file = Path(accepted_words_file) if accepted_words_file else None
         self.hook = None
+        self.mouse_hook = None
         self.last_window = None
+        self.context_unknown = True
         self.last_undo: UndoRecord | None = None
+        self.last_correction: UndoRecord | None = None
+        self.rewrite_backspaces = 0
         self.pending_undo: tuple[UndoRecord, int] | None = None
         self.swallowed_keys: set[int] = set()
         self.pressed_keys: set[int] = set()
         self.callback = HOOKPROC(self._callback)
+        self.mouse_callback = HOOKPROC(self._mouse_callback)
+        self.word_save_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        if self.accepted_words_file:
+            threading.Thread(target=self._save_words, daemon=True).start()
 
     def run(self) -> None:
         self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self.callback, kernel32.GetModuleHandleW(None), 0)
         if not self.hook:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self.mouse_callback, kernel32.GetModuleHandleW(None), 0)
+        if not self.mouse_hook:
+            user32.UnhookWindowsHookEx(self.hook)
+            self.hook = None
             raise ctypes.WinError(ctypes.get_last_error())
         message = wintypes.MSG()
         try:
@@ -137,9 +157,19 @@ class KeyboardDaemon:
         finally:
             user32.UnhookWindowsHookEx(self.hook)
             self.hook = None
+            user32.UnhookWindowsHookEx(self.mouse_hook)
+            self.mouse_hook = None
 
     def _next(self, code: int, wparam: int, lparam: int) -> int:
         return user32.CallNextHookEx(self.hook, code, wparam, lparam)
+
+    def _mouse_callback(self, code: int, wparam: int, lparam: int) -> int:
+        if code >= 0 and wparam in MOUSE_CLICKS:
+            self.engine.reset_context()
+            self.context_unknown = True
+            self.last_undo = None
+            self.last_correction = None
+        return user32.CallNextHookEx(self.mouse_hook, code, wparam, lparam)
 
     def _callback(self, code: int, wparam: int, lparam: int) -> int:
         try:
@@ -170,29 +200,53 @@ class KeyboardDaemon:
             if foreground != self.last_window:
                 self.last_window = foreground
                 self.engine.reset_context()
+                self.context_unknown = True
                 self.last_undo = None
+                self.last_correction = None
             if self.pause_file.exists() or sensitive_target(foreground):
                 self.engine.reset_context()
+                self.context_unknown = True
                 self.last_undo = None
+                self.last_correction = None
                 return self._next(code, wparam, lparam)
+
+            if self.context_unknown and vk not in CONTROL_KEYS | ALT_KEYS | WINDOWS_KEYS:
+                self.engine.reset_context(start_of_sentence=is_known_document_start())
+                self.context_unknown = False
 
             if vk == VK_BACK and self.pressed_keys.intersection(CONTROL_KEYS) and self.pressed_keys.intersection(ALT_KEYS):
                 if self.last_undo:
                     self.swallowed_keys.add(vk)
+                    self._accept_original(self.last_undo)
                     self.pending_undo = (self.last_undo, foreground)
                     self.last_undo = None
+                    self.last_correction = None
                     self.engine.reset_context()
                     return 1
                 return self._next(code, wparam, lparam)
             if vk in MODIFIER_KEYS:
-                self.engine.reset_context()
+                if vk in CONTROL_KEYS | ALT_KEYS | WINDOWS_KEYS:
+                    self.engine.reset_context()
+                    self.context_unknown = True
                 return self._next(code, wparam, lparam)
             if self.pressed_keys.intersection(CONTROL_KEYS | ALT_KEYS | WINDOWS_KEYS):
+                if vk == 0x5A and self.last_correction and self.pressed_keys.intersection(CONTROL_KEYS):
+                    self._accept_original(self.last_correction)
                 self.engine.reset_context()
+                self.context_unknown = True
                 self.last_undo = None
+                self.last_correction = None
                 return self._next(code, wparam, lparam)
             if vk == VK_BACK:
+                if self.last_correction:
+                    self.rewrite_backspaces += 1
+                    if self.rewrite_backspaces >= 2:
+                        self._accept_original(self.last_correction)
+                        self.last_correction = None
+                had_word = bool(self.engine.current_word)
                 self.engine.backspace()
+                if not had_word:
+                    self.context_unknown = True
                 self.last_undo = None
                 return self._next(code, wparam, lparam)
 
@@ -203,9 +257,13 @@ class KeyboardDaemon:
                 self.swallowed_keys.add(vk)
                 if plan:
                     send_replacement(plan.delete_count, plan.insert_text)
-                    self.last_undo = UndoRecord(plan.original_text, plan.insert_text)
+                    record = UndoRecord(plan.original_text, plan.insert_text)
+                    self.last_undo = record
+                    self.last_correction = record
+                    self.rewrite_backspaces = 0
                     return 1
                 self.last_undo = None
+                self.last_correction = None
                 send_replacement(0, {"space": " ", "enter": "\r"}.get(kind, punctuation))
                 return 1
 
@@ -215,10 +273,13 @@ class KeyboardDaemon:
                 self.swallowed_keys.add(vk)
                 send_replacement(0, typed)
                 self.last_undo = None
+                self.last_correction = None
                 return 1
             elif vk not in (0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5):
                 self.engine.reset_context()
+                self.context_unknown = True
             self.last_undo = None
+            self.last_correction = None
             return self._next(code, wparam, lparam)
         except Exception:
             return self._next(code, wparam, lparam)
@@ -228,6 +289,22 @@ class KeyboardDaemon:
             try:
                 send_replacement(len(undo.replacement), undo.original)
             except Exception:
+                pass
+
+    def _accept_original(self, record: UndoRecord) -> None:
+        original_word = record.original.rstrip(" \r.!?,;:")
+        accepted = self.engine.accept_word(original_word)
+        if accepted and self.accepted_words_file:
+            self.word_save_queue.put(accepted)
+
+    def _save_words(self) -> None:
+        while True:
+            word = self.word_save_queue.get()
+            try:
+                self.accepted_words_file.parent.mkdir(parents=True, exist_ok=True)
+                with self.accepted_words_file.open("a", encoding="utf-8") as stream:
+                    stream.write(word + "\n")
+            except OSError:
                 pass
 
 
@@ -286,6 +363,25 @@ def focused_window() -> int | None:
     if user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)) and info.hwndFocus:
         return info.hwndFocus
     return foreground
+
+
+def is_known_document_start() -> bool:
+    """Only infer a new sentence when a standard native editor is empty."""
+    target = focused_window()
+    if not target:
+        return False
+    class_name = ctypes.create_unicode_buffer(256)
+    if not user32.GetClassNameW(target, class_name, len(class_name)):
+        return False
+    editor_class = class_name.value.casefold()
+    if not (editor_class == "edit" or editor_class.startswith("richedit")):
+        return False
+    length = ctypes.c_size_t()
+    if not user32.SendMessageTimeoutW(
+        target, WM_GETTEXTLENGTH, 0, 0, 0x2, 50, ctypes.byref(length),
+    ):
+        return False
+    return length.value == 0
 
 
 def key_input(vk: int, flags: int = 0) -> INPUT:

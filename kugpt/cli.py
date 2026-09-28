@@ -7,13 +7,14 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .engine import TextEngine, correct_text
+from .engine import PROTECTED_WORDS, TextEngine, correct_text, normalize_user_word
 from .spelling import SymSpell
 
 
 DATA_DIR = Path(os.environ.get("KUGPT_DATA_DIR", Path(os.environ.get("LOCALAPPDATA", Path.home())) / "kuGPT"))
 PID_FILE = DATA_DIR / "kugpt.pid"
 PAUSE_FILE = DATA_DIR / "paused"
+ACCEPTED_WORDS_FILE = DATA_DIR / "accepted_words.txt"
 ROOT = Path(__file__).resolve().parents[1]
 DICTIONARY = ROOT / "data" / "frequency_dictionary_en_82_765.txt"
 
@@ -34,6 +35,8 @@ def main(arguments: list[str] | None = None) -> int:
         if command == "doctor": return doctor()
         if command == "check": return check(args)
         if command == "fix": return fix(args)
+        if command == "allow-word": return change_word(args, allow=True)
+        if command == "forget-word": return change_word(args, allow=False)
         if command in ("version", "--version"): print(f"kuGPT {__version__}"); return 0
         if command in ("help", "--help", "-h"): show_help(); return 0
         print(f"Unknown command: {command}", file=sys.stderr); show_help(); return 2
@@ -57,7 +60,11 @@ def run_daemon() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()), encoding="ascii")
     try:
-        KeyboardDaemon(TextEngine(provider()), PAUSE_FILE).run()
+        KeyboardDaemon(
+            TextEngine(provider(), accepted_words=load_accepted_words(), initial_sentence_start=False),
+            PAUSE_FILE,
+            ACCEPTED_WORDS_FILE,
+        ).run()
     finally:
         PID_FILE.unlink(missing_ok=True)
     return 0
@@ -108,7 +115,7 @@ def status() -> int:
     print("Status: " + ("running" if running else "stopped"))
     if running: print(f"PID: {pid}")
     print("Corrections: " + ("paused" if PAUSE_FILE.exists() else "active"))
-    print("Processing: local memory only")
+    print("Processing: local; accepted words saved on this device")
     return 0 if running else 1
 
 
@@ -170,9 +177,13 @@ def check(words: list[str]) -> int:
         print("Usage: kugpt check <word> [word ...]", file=sys.stderr)
         return 2
     spelling = provider()
+    accepted = PROTECTED_WORDS | load_accepted_words()
     for word in words:
-        suggestion = spelling.suggest(word)
-        print(f"{word} -> {suggestion or '(correct/no suggestion)'}")
+        if word.casefold() in accepted:
+            print(f"{word} -> (kept as typed)")
+        else:
+            suggestion = spelling.suggest(word)
+            print(f"{word} -> {suggestion or '(correct/no suggestion)'}")
     return 0
 
 
@@ -181,8 +192,38 @@ def fix(parts: list[str]) -> int:
         print("Usage: kugpt fix <text>", file=sys.stderr)
         return 2
     text = " ".join(parts)
-    print(correct_text(TextEngine(provider()), text + " ").rstrip())
+    print(correct_text(TextEngine(provider(), accepted_words=load_accepted_words()), text + " ").rstrip())
     return 0
+
+
+def load_accepted_words() -> set[str]:
+    try:
+        return set(ACCEPTED_WORDS_FILE.read_text(encoding="utf-8").splitlines())
+    except FileNotFoundError:
+        return set()
+
+
+def change_word(parts: list[str], allow: bool) -> int:
+    if len(parts) != 1 or not (word := normalize_user_word(parts[0])):
+        print("Usage: kugpt allow-word WORD" if allow else "Usage: kugpt forget-word WORD", file=sys.stderr)
+        return 2
+    if not allow and word in PROTECTED_WORDS:
+        print(f"{word} is always protected by kuGPT.")
+        return 0
+    was_running = bool((pid := read_pid()) and process_running(pid))
+    if was_running:
+        stop(False)
+    words = {normalized for item in load_accepted_words() if (normalized := normalize_user_word(item))}
+    if allow:
+        words.add(word)
+    else:
+        words.discard(word)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = ACCEPTED_WORDS_FILE.with_suffix(".tmp")
+    temporary.write_text("".join(item + "\n" for item in sorted(words)), encoding="utf-8")
+    temporary.replace(ACCEPTED_WORDS_FILE)
+    print(f"{word}: " + ("will be left as typed" if allow else "removed from accepted words"))
+    return start() if was_running else 0
 
 
 def read_pid() -> int | None:
@@ -208,6 +249,8 @@ def show_help() -> None:
     print("  kugpt status|doctor        Inspect the local service")
     print("  kugpt check WORD [...]     Preview SymSpell suggestions")
     print("  kugpt fix TEXT             Preview a corrected sentence")
+    print("  kugpt allow-word WORD      Keep a word exactly as typed")
+    print("  kugpt forget-word WORD     Remove a custom accepted word")
     print("  kugpt uninstall            Remove startup and stop")
     print("\nUndo the latest correction: Ctrl+Alt+Backspace")
 

@@ -39,6 +39,25 @@ class EngineTests(unittest.TestCase):
     def test_transposition_distance(self):
         self.assertEqual(1, damerau_levenshtein("nto", "not"))
 
+    def test_unknown_context_does_not_capitalize(self):
+        engine = TextEngine(self.spelling)
+        engine.reset_context()
+        self.assertEqual("the cat ", correct_text(engine, "teh cat "))
+
+    def test_custom_name_is_kept(self):
+        self.assertEqual("kugpt kuGPT ", correct_text(TextEngine(self.spelling), "kugpt kuGPT "))
+
+    def test_rejected_correction_is_not_repeated(self):
+        engine = TextEngine(self.spelling, initial_sentence_start=False)
+        self.assertEqual("the ", correct_text(engine, "teh "))
+        self.assertEqual("teh", engine.accept_word("teh"))
+        engine.reset_context()
+        self.assertEqual("teh ", correct_text(engine, "teh "))
+
+    def test_middle_sentence_title_case_is_kept(self):
+        engine = TextEngine(self.spelling, initial_sentence_start=False)
+        self.assertEqual("my kuGPT Test ", correct_text(engine, "my kuGPT Test "))
+
 
 if __name__ == "__main__":
     unittest.main()
