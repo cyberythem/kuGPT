@@ -23,7 +23,10 @@ function Copy-OrDownload([string]$RelativePath, [string]$Target) {
     }
     else {
         $WebPath = $RelativePath.Replace('\', '/')
-        Invoke-WebRequest -UseBasicParsing -Uri "$RepositoryRoot/$WebPath" -OutFile $Target
+        # Raw GitHub responses can be briefly cached after a push. A fresh
+        # query value makes upgrades fetch the current file contents.
+        $CacheKey = [Guid]::NewGuid().ToString("N")
+        Invoke-WebRequest -UseBasicParsing -Uri "$RepositoryRoot/${WebPath}?kugpt=$CacheKey" -OutFile $Target
     }
 }
 
