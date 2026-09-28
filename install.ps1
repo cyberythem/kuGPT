@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepositoryRoot = "https://raw.githubusercontent.com/cyberythem/kuGPT/main"
+$RepositoryRoot = "https://raw.githubusercontent.com/cyberythem/kuGPT/291097205c3aef72c5e6acb314f6144e79b0607d"
 $PythonUrl = "https://www.python.org/ftp/python/3.13.7/python-3.13.7-embed-amd64.zip"
 $PythonSha256 = "F6CCA216A359BE84797CABB54149CE5E062AFB16CC7567EB7FC51CACB2D86B65"
 $DictionaryUrl = "https://raw.githubusercontent.com/wolfgarbe/SymSpell/v6.7.3/SymSpell/frequency_dictionary_en_82_765.txt"
@@ -23,10 +23,7 @@ function Copy-OrDownload([string]$RelativePath, [string]$Target) {
     }
     else {
         $WebPath = $RelativePath.Replace('\', '/')
-        # Raw GitHub responses can be briefly cached after a push. A fresh
-        # query value makes upgrades fetch the current file contents.
-        $CacheKey = [Guid]::NewGuid().ToString("N")
-        Invoke-WebRequest -UseBasicParsing -Uri "$RepositoryRoot/${WebPath}?kugpt=$CacheKey" -OutFile $Target
+        Invoke-WebRequest -UseBasicParsing -Uri "$RepositoryRoot/$WebPath" -OutFile $Target
     }
 }
 
