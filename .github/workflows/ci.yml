@@ -12,10 +12,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test local correction engine
         shell: powershell
         run: .\build.ps1 -Test
       - name: Run diagnostics
-        shell: powershell
-        run: .\dist\kugpt.exe doctor
+        run: python kugpt_launcher.py doctor
 

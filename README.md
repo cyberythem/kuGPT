@@ -1,6 +1,8 @@
 # kuGPT
 
-Local, system-wide writing correction for Windows. kuGPT fixes common spelling mistakes, capitalizes sentences, and adds conservative punctuation in desktop applications without sending or storing what you type.
+Private, local, system-wide writing correction for Windows. kuGPT corrects spelling with a SymSpell-style engine, capitalizes sentences, and adds conservative punctuation in desktop apps such as Notepad, WhatsApp, and Microsoft Office.
+
+Everything typed is processed in a short in-memory buffer. There is no account, API key, telemetry, cloud model, or stored typing history.
 
 ## Install
 
@@ -10,56 +12,74 @@ Open PowerShell and run:
 irm https://raw.githubusercontent.com/cyberythem/kuGPT/main/install.ps1 | iex
 ```
 
-The installer uses Windows' built-in .NET Framework compiler, creates one local executable, starts it, and enables it at sign-in. No Python, Node.js, Rust, account, API key, or cloud service is required.
+The installer downloads Python's official signed embedded runtime and the pinned SymSpell English frequency dictionary, verifies both, enables kuGPT at sign-in, and starts it. You do **not** need Python installed.
 
-> The repository must be public for the one-line installer to work without GitHub authentication.
+## Test it
 
-## Use
+Open a new PowerShell window:
 
 ```powershell
+kugpt doctor
+kugpt fix i am nto tehe ncie pesron
+kugpt status
+```
+
+The second command must print:
+
+```text
+I am not the nice person
+```
+
+Then type `i am nto tehe ncie pesron ` in Notepad. It should become `I am not the nice person ` as each word boundary is reached.
+
+## Commands
+
+```powershell
+kugpt start
+kugpt stop
+kugpt restart
 kugpt status
 kugpt pause
 kugpt resume
-kugpt stop
-kugpt start
 kugpt doctor
+kugpt check nto tehe ncie pesron
+kugpt fix i am nto tehe ncie pesron
 kugpt uninstall
 ```
 
-Undo the most recent automatic correction with `Ctrl+Alt+Backspace`.
+Undo the most recent live correction with `Ctrl+Alt+Backspace`.
 
-Examples:
+## Current behavior
 
-- `teh ` becomes `The ` at the beginning of a sentence.
-- `i dont ` becomes `I don't `.
-- Pressing Enter after an unfinished sentence adds a period.
-- Typing two spaces after three or more words changes the first space to `. `.
-- `should of ` becomes `should have ` using the previous word as context.
+- Corrects high-confidence English misspellings at a space, punctuation mark, or Enter.
+- Capitalizes the first word after startup, a window change, or `.`, `!`, and `?`.
+- Two spaces after a sentence of at least three words produce a period and one space.
+- Enter adds a period to an unfinished sentence.
+- Includes a few context rules, such as `should of` to `should have`.
+- Recognizes every word in the 82,000+ word dictionary and indexes the 25,000 most frequent correction candidates.
+
+Automatic correction is deliberately conservative. A deeper local context model, Hunspell language packs, per-app exclusions, and automatic language switching belong in later releases.
 
 ## Privacy and safety
 
-- Text is held only in a short in-memory buffer.
-- kuGPT writes no typing history and makes no network requests.
-- The buffer is cleared whenever the focused window changes.
+- The current word and short sentence state exist only in memory.
+- The buffer clears whenever the focused window changes.
 - Standard Windows password inputs and common password-manager processes are excluded.
-- Corrections are deliberately conservative and can be undone immediately.
+- Browser-rendered password fields cannot always be identified through Windows APIs. Pause kuGPT before entering secrets in an app that does not expose password metadata.
+- The installer does not disable or bypass Windows Security.
 
-Browser-rendered password fields cannot always be identified through the Windows API. Pause kuGPT before entering secrets in an application you do not trust to expose password-field metadata.
+## Development
 
-## Current scope
-
-Version 0.1 is a Windows-first English MVP. It uses a high-confidence correction dictionary and one contextual grammar rule. Broader dictionaries, user configuration, additional languages, and an optional local context model are planned after the keyboard pipeline has been validated across applications.
-
-## Build and test
-
-No downloaded dependencies are needed:
+Python 3.10+ is enough for development:
 
 ```powershell
 .\build.ps1 -Test
-.\dist\kugpt.exe doctor
+python kugpt_launcher.py doctor
 ```
+
+The end-user installer remains self-contained and does not use the developer's Python installation.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please keep the core offline by default and avoid adding telemetry or cloud dependencies.
+Issues and pull requests are welcome. Keep the correction core offline by default and do not add telemetry.
 

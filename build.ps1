@@ -1,29 +1,24 @@
-param(
-    [switch]$Test
-)
+param([switch]$Test)
 
 $ErrorActionPreference = "Stop"
-$ProjectRoot = $PSScriptRoot
-$Compiler = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-if (-not (Test-Path -LiteralPath $Compiler)) {
-    $Compiler = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
-}
-if (-not (Test-Path -LiteralPath $Compiler)) {
-    throw "The built-in Windows C# compiler was not found."
-}
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $Python) { $Python = Get-Command py -ErrorAction SilentlyContinue }
+if (-not $Python) { throw "Python is required for development tests. End users get a bundled signed runtime." }
 
-$Dist = Join-Path $ProjectRoot "dist"
-New-Item -ItemType Directory -Force -Path $Dist | Out-Null
-$Sources = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "src") -Filter "*.cs" | ForEach-Object FullName
-
-& $Compiler /nologo /optimize+ /target:exe /platform:anycpu /reference:System.Drawing.dll /out:"$Dist\kugpt.exe" $Sources
-if ($LASTEXITCODE -ne 0) { throw "kuGPT compilation failed." }
-Write-Host "Built $Dist\kugpt.exe"
+$Dictionary = Join-Path $PSScriptRoot "data\frequency_dictionary_en_82_765.txt"
+$DictionarySha256 = "C604E1121E398AE7C7FBF777F11E0A0F2FA66EDA932CB9FBA1321466CF3ACD7B"
+if (-not (Test-Path -LiteralPath $Dictionary)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $Dictionary -Parent) | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/wolfgarbe/SymSpell/v6.7.3/SymSpell/frequency_dictionary_en_82_765.txt" -OutFile $Dictionary
+}
+if ((Get-FileHash -LiteralPath $Dictionary -Algorithm SHA256).Hash -ne $DictionarySha256) {
+    throw "SymSpell dictionary checksum verification failed."
+}
 
 if ($Test) {
-    & $Compiler /nologo /optimize+ /target:exe /main:KuGPT.Tests.EngineTests /reference:System.Drawing.dll /out:"$Dist\engine-tests.exe" (Join-Path $ProjectRoot "src\TextEngine.cs") (Join-Path $ProjectRoot "tests\EngineTests.cs")
-    if ($LASTEXITCODE -ne 0) { throw "Test compilation failed." }
-    & "$Dist\engine-tests.exe"
-    if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
+    & $Python.Source -m unittest discover -s tests -v
+    exit $LASTEXITCODE
 }
+
+Write-Host "kuGPT is pure Python; run .\build.ps1 -Test to verify it."
 

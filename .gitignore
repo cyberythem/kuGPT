@@ -1,4 +1,7 @@
 dist/
+data/frequency_dictionary_en_82_765.txt
+__pycache__/
+*.py[cod]
 *.user
 *.suo
 
